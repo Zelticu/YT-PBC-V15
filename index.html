@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pendulum Takeover — 30 Seconds</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#16161b;color:white;font-family:system-ui,sans-serif;display:flex;justify-content:center;padding:16px}
+#game{width:100%;max-width:540px}
+.stage{position:relative;width:100%;aspect-ratio:4/5;overflow:hidden;border-radius:12px;background:#29292e}
+canvas{display:block;width:100%;height:100%}
+.menu{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:rgba(18,19,25,.97);padding:18px}
+.heading{font-size:23px;font-weight:900;text-align:center}
+.subtitle{font-size:12px;color:#bbb}
+.pickers{display:flex;gap:28px}
+.pickers label{display:flex;flex-direction:column;align-items:center;gap:8px;font-size:12px}
+input[type=color]{width:75px;height:55px;border:0;background:transparent;cursor:pointer}
+.presets{display:flex;gap:7px;justify-content:center;flex-wrap:wrap}
+button{cursor:pointer;border:0;border-radius:9px;font-weight:800}
+.start{background:white;color:#17171c;padding:12px 36px}
+.controls{display:flex;justify-content:center;gap:9px;margin-top:10px}
+.restart{background:#24242a;color:white;padding:9px 17px}
+.pause{background:#e5e7eb;color:#222;padding:9px 17px}
+.small{font-size:11px;color:#aaa}
+</style>
+</head>
+<body>
+<div id="game">
+<div class="stage">
+<canvas></canvas>
+<div class="menu">
+<div class="heading">PENDULUM TAKEOVER</div>
+<div class="subtitle">CHOOSE YOUR COLORS</div>
+<div class="pickers">
+<label>BALL 1<input class="c1" type="color" value="#ff287b"></label>
+<label>BALL 2<input class="c2" type="color" value="#3368ff"></label>
+</div>
+<div class="presets"></div>
+<button class="start">START MATCH ▶</button>
+<div class="small">30-second takeover · Silent</div>
+</div>
+</div>
+<div class="controls">
+<button class="restart">↻ New Match</button>
+<button class="pause">Pause</button>
+</div>
+</div>
+<script>
+(()=>{
+const root=document.getElementById('game');
+const cv=root.querySelector('canvas');
+const ctx=cv.getContext('2d');
+const menu=root.querySelector('.menu');
+const picks=[root.querySelector('.c1'),root.querySelector('.c2')];
+const rand=(a,b)=>a+Math.random()*(b-a);
+const rgb=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16));
+const shade=(h,f)=>`rgb(${rgb(h).map(v=>Math.round(v*f)).join(',')})`;
+let W=400,H=500,colors=[],balls=[],shots=[],ashes=[],pixels=[],trails=[],stars=[];
+let owner=-1,pulse=0,winTime=0,spawn=5,starSpawn=.5;
+let started=false,paused=false,ended=false,last=0,simTime=0,matchTime=0;
+const presets=[
+['#ff287b','#3368ff'],
+['#a855f7','#2ee6a6'],
+['#ffad25','#27b9ff'],
+['#ff4545','#d9f532'],
+['#f0f0f0','#e24aff']
+];
+presets.forEach(pair=>{
+let btn=document.createElement('button');
+btn.style.cssText='display:flex;gap:3px;padding:5px;border:1px solid #777;border-radius:8px;background:#24252b;cursor:pointer';
+pair.forEach(c=>{
+let s=document.createElement('span');
+s.style.cssText=`width:21px;height:21px;border-radius:5px;background:${c}`;
+btn.appendChild(s);
+});
+btn.onclick=()=>pair.forEach((c,i)=>picks[i].value=c);
+root.querySelector('.presets').appendChild(btn);
+});
+function resize(){
+let r=cv.getBoundingClientRect();
+W=r.width||400;
+H=r.height||500;
+let d=Math.min(devicePixelRatio||1,2);
+cv.width=Math.round(W*d);
+cv.height=Math.round(H*d);
+ctx.setTransform(d,0,0,d,0,0);
+}
+function geom(){
+return {
+ax:W*.5,ay:H*.13,L:H*.44,
+r:Math.max(16,W*.068),
+zx:W*.5,zy:H*.52,
+zr:Math.max(24,W*.086)
+};
+}
+function pos(b,g){
+return {
+x:g.ax+Math.sin(b.angle)*g.L,
+y:g.ay+Math.cos(b.angle)*g.L
+};
+}
+function init(){
+balls=[
+{id:0,angle:-.78,vel:.03,slow:0,inside:false},
+{id:1,angle:.78,vel:-.03,slow:0,inside:false}
+];
+shots=[];pixels=[];trails=[];stars=[];
+ashes=Array.from({length:43},()=>({
+x:Math.random(),y:Math.random(),r:rand(5,12),
+vx:rand(-.009,.009),vy:rand(-.019,-.005),
+alpha:rand(.14,.32),phase:rand(0,6.28)
+}));
+owner=-1;pulse=0;winTime=0;
+spawn=rand(4.5,6);
+starSpawn=.25;
+paused=false;ended=false;last=0;
+simTime=0;matchTime=0;
+root.querySelector('.pause').textContent='Pause';
+}
+root.querySelector('.start').onclick=()=>{
+colors=picks.map(p=>p.value);
+init();
+started=true;
+menu.style.display='none';
+};
+root.querySelector('.restart').onclick=()=>{
+started=false;
+init();
+menu.style.display='flex';
+};
+root.querySelector('.pause').onclick=function(){
+if(!started)return;
+paused=!paused;
+this.textContent=paused?'Resume':'Pause';
+};
+function fragment(x,y,c,n,fall){
+for(let i=0;i<n;i++){
+let a=rand(0,Math.PI*2);
+let v=rand(20,fall?165:75);
+pixels.push({
+x,y,vx:Math.cos(a)*v,
+vy:Math.sin(a)*v-(fall?35:0),
+life:rand(fall?1.4:.2,fall?3.1:.6),
+c,size:rand(2,fall?6:4),fall
+});
+}
+}
+function bounce(g){
+let a=balls[0],b=balls[1];
+let p=pos(a,g),q=pos(b,g);
+if(Math.hypot(p.x-q.x,p.y-q.y)>=g.r*2)return;
+let gap=2*Math.asin(Math.min(.99,g.r/g.L))+.0005;
+let center=(a.angle+b.angle)/2;
+let sign=a.angle<=b.angle?-1:1;
+a.angle=center+sign*gap/2;
+b.angle=center-sign*gap/2;
+let va=a.vel,vb=b.vel;
+a.vel=vb*.88;
+b.vel=va*.88;
+}
+function takeover(id){
+if(owner===id)return;
+owner=id;
+pulse=.85;
+}
+function update(dt){
+if(!started||paused)return;
+simTime+=dt;
+matchTime+=dt;
+let g=geom();
+pulse=Math.max(0,pulse-dt);
+if(ended){
+winTime+=dt;
+let b=balls[owner];
+b.vel+=(-1.05*Math.sin(b.angle)-.08*b.vel)*dt;
+b.angle+=b.vel*dt;
+}else{
+for(let b of balls){
+let factor=b.slow>0?.28:1;
+b.vel+=(-1.12*Math.sin(b.angle)-.085*b.vel)*dt*factor;
+b.angle+=b.vel*dt*factor;
+if(b.slow>0){
+b.slow=Math.max(0,b.slow-dt);
+let q=pos(b,g);
+trails.push({
+x:q.x,y:q.y,life:1.5,max:1.5,
+r:g.r*.72,id:b.id
+});
+}
+}
+bounce(g);
+spawn-=dt;
+if(spawn<=0){
+let side=Math.random()<.5?0:1;
+let target=balls[Math.floor(Math.random()*2)];
+let q=pos(target,g);
+let x=side?W+15:-15;
+let y=rand(H*.23,H*.59);
+let tx=q.x+rand(-40,40);
+let ty=q.y+rand(-30,30);
+let d=Math.hypot(tx-x,ty-y);
+let v=rand(85,125);
+shots.push({
+x,y,vx:(tx-x)/d*v,
+vy:(ty-y)/d*v,
+r:Math.max(9,W*.025)
+});
+spawn=rand(5.5,7.5);
+}
+for(let i=shots.length-1;i>=0;i--){
+let s=shots[i];
+s.x+=s.vx*dt;
+s.y+=s.vy*dt;
+let hit=false;
+for(let b of balls){
+let q=pos(b,g);
+if(Math.hypot(q.x-s.x,q.y-s.y)<g.r+s.r){
+b.slow=3;
+fragment(q.x,q.y,'#b5b5bc',10,false);
+hit=true;
+break;
+}
+}
+if(hit||s.x< -50||s.x>W+50||s.y< -50||s.y>H+50)
+shots.splice(i,1);
+}
+starSpawn-=dt;
+if(starSpawn<=0){
+stars.push({
+x:rand(W*.08,W*.92),
+y:-10,
+vx:rand(-10,10),
+vy:rand(48,92),
+size:rand(3,6),
+twinkle:rand(0,6.28),
+life:7
+});
+starSpawn=rand(.23,.48);
+}
+for(let i=stars.length-1;i>=0;i--){
+let s=stars[i];
+s.x+=s.vx*dt;
+s.y+=s.vy*dt;
+s.life-=dt;
+let hit=false;
+for(let b of balls){
+let q=pos(b,g);
+if(Math.hypot(q.x-s.x,q.y-s.y)<g.r+s.size){
+let dir=(q.x-s.x)>=0?1:-1;
+b.vel=Math.max(-1.7,Math.min(1.7,b.vel+dir*rand(.06,.15)));
+fragment(s.x,s.y,'#fff5cc',4,false);
+hit=true;
+break;
+}
+}
+if(hit||s.y>H+15||s.life<=0)stars.splice(i,1);
+}
+bounce(g);
+for(let b of balls){
+let q=pos(b,g);
+let inside=Math.hypot(q.x-g.zx,q.y-g.zy)<g.zr;
+if(inside&&!b.inside&&owner!==b.id)takeover(b.id);
+b.inside=inside;
+}
+if(matchTime>=30){
+ended=true;
+winTime=0;
+shots=[];
+balls.forEach(b=>b.slow=0);
+if(owner<0)owner=Math.random()<.5?0:1;
+let q=pos(balls[1-owner],g);
+fragment(q.x,q.y,colors[1-owner],150,true);
+}
+}
+for(let a of ashes){
+a.x+=a.vx*dt;
+a.y+=a.vy*dt;
+if(a.y<-.04)a.y=1.04;
+if(a.x<-.03)a.x=1.03;
+if(a.x>1.03)a.x=-.03;
+}
+for(let i=trails.length-1;i>=0;i--){
+trails[i].life-=dt;
+if(trails[i].life<=0)trails.splice(i,1);
+}
+for(let i=pixels.length-1;i>=0;i--){
+let p=pixels[i];
+p.x+=p.vx*dt;
+p.y+=p.vy*dt;
+p.vy+=(p.fall?170:65)*dt;
+if(p.fall)p.vx*=Math.exp(-.45*dt);
+p.life-=dt;
+if(p.life<=0||p.y>H+20)pixels.splice(i,1);
+}
+}
+function circle(x,y,r,c,blur=0){
+ctx.save();
+ctx.fillStyle=c;
+if(blur){
+ctx.shadowColor=c;
+ctx.shadowBlur=blur;
+}
+ctx.beginPath();
+ctx.arc(x,y,r,0,Math.PI*2);
+ctx.fill();
+ctx.restore();
+}
+function star(x,y,r,alpha){
+ctx.save();
+ctx.translate(x,y);
+ctx.globalAlpha=alpha;
+ctx.fillStyle='#fff8db';
+ctx.shadowColor='#fff7ba';
+ctx.shadowBlur=12;
+ctx.beginPath();
+ctx.moveTo(0,-r*1.7);
+ctx.quadraticCurveTo(r*.25,-r*.25,r,0);
+ctx.quadraticCurveTo(r*.25,r*.25,0,r*1.7);
+ctx.quadraticCurveTo(-r*.25,r*.25,-r,0);
+ctx.quadraticCurveTo(-r*.25,-r*.25,0,-r*1.7);
+ctx.fill();
+ctx.restore();
+}
+function render(){
+let g=geom();
+ctx.fillStyle=owner<0?'#29292e':shade(colors[owner],.57);
+ctx.fillRect(0,0,W,H);
+if(owner>=0){
+let v=.035+.02*Math.sin(simTime*1.7);
+let grad=ctx.createRadialGradient(g.zx,g.zy,10,g.zx,g.zy,W*.65);
+grad.addColorStop(0,`rgba(255,255,255,${v})`);
+grad.addColorStop(1,'rgba(255,255,255,0)');
+ctx.fillStyle=grad;
+ctx.fillRect(0,0,W,H);
+}
+for(let a of ashes){
+ctx.globalAlpha=a.alpha*(.91+.09*Math.sin(simTime*.9+a.phase));
+ctx.fillStyle=owner<0?'#a4a4ad':shade(colors[owner],.32);
+ctx.beginPath();
+ctx.arc(a.x*W,a.y*H,a.r,0,Math.PI*2);
+ctx.fill();
+}
+ctx.globalAlpha=1;
+for(let s of stars)
+star(s.x,s.y,s.size,.65+.35*Math.sin(simTime*5+s.twinkle));
+if(pulse>0&&owner>=0){
+let progress=1-pulse/.85;
+ctx.save();
+ctx.globalAlpha=(1-progress)*.35;
+ctx.strokeStyle=colors[owner];
+ctx.lineWidth=5;
+ctx.shadowColor=colors[owner];
+ctx.shadowBlur=22;
+ctx.beginPath();
+ctx.arc(g.zx,g.zy,g.zr+progress*W*.55,0,Math.PI*2);
+ctx.stroke();
+ctx.restore();
+}
+if(!ended){
+ctx.save();
+ctx.setLineDash([11,9]);
+ctx.lineWidth=3;
+ctx.strokeStyle='white';
+ctx.shadowColor='white';
+ctx.shadowBlur=owner<0?0:14;
+ctx.beginPath();
+ctx.arc(g.zx,g.zy,g.zr,0,Math.PI*2);
+ctx.stroke();
+ctx.restore();
+}
+for(let id=0;id<2;id++){
+let arr=trails.filter(t=>t.id===id);
+if(arr.length<2)continue;
+ctx.save();
+ctx.lineCap='round';
+ctx.lineJoin='round';
+for(let i=1;i<arr.length;i++){
+let a=arr[i-1],b=arr[i];
+if(Math.hypot(a.x-b.x,a.y-b.y)>g.r*2)continue;
+let fade=Math.min(a.life,b.life)/1.5;
+ctx.strokeStyle=`rgba(190,195,205,${fade*.14})`;
+ctx.lineWidth=g.r*1.15*fade+.5;
+ctx.shadowColor='#c3c6d1';
+ctx.shadowBlur=9;
+ctx.beginPath();
+ctx.moveTo(a.x,a.y);
+ctx.lineTo(b.x,b.y);
+ctx.stroke();
+}
+ctx.restore();
+}
+for(let b of balls){
+if(ended&&b.id!==owner)continue;
+let q=pos(b,g);
+ctx.strokeStyle='#101015';
+ctx.lineWidth=2.8;
+ctx.beginPath();
+ctx.moveTo(g.ax,g.ay);
+ctx.lineTo(q.x,q.y);
+ctx.stroke();
+}
+circle(g.ax,g.ay,8,'#111116');
+for(let s of shots){
+circle(s.x,s.y,s.r,'#9999a0',8);
+ctx.save();
+ctx.strokeStyle='white';
+ctx.lineWidth=2.3;
+ctx.lineCap='round';
+ctx.lineJoin='round';
+ctx.beginPath();
+ctx.moveTo(s.x,s.y-s.r*.55);
+ctx.lineTo(s.x,s.y+s.r*.5);
+ctx.moveTo(s.x-s.r*.35,s.y+s.r*.15);
+ctx.lineTo(s.x,s.y+s.r*.5);
+ctx.lineTo(s.x+s.r*.35,s.y+s.r*.15);
+ctx.stroke();
+ctx.restore();
+}
+for(let b of balls){
+if(ended&&b.id!==owner)continue;
+let q=pos(b,g),c=colors[b.id];
+if(ended&&b.id===owner){
+ctx.save();
+ctx.strokeStyle=c;
+ctx.lineWidth=3.5;
+ctx.shadowColor=c;
+ctx.shadowBlur=24;
+ctx.beginPath();
+ctx.arc(q.x,q.y,g.r*1.75+Math.sin(winTime*4)*4,0,Math.PI*2);
+ctx.stroke();
+ctx.restore();
+}
+circle(q.x,q.y,g.r,c,g.r*1.4);
+if(b.slow>0){
+ctx.textAlign='center';
+ctx.fillStyle='#f0f0f0';
+ctx.font=`${Math.max(16,W*.05)}px system-ui`;
+ctx.fillText(Math.ceil(b.slow),q.x,q.y-g.r-13);
+}
+}
+for(let p of pixels){
+ctx.globalAlpha=Math.min(1,p.life/.5);
+ctx.fillStyle=p.c;
+ctx.fillRect(p.x,p.y,p.size,p.size);
+}
+ctx.globalAlpha=1;
+if(!ended){
+ctx.textAlign='center';
+ctx.fillStyle='white';
+ctx.font=`${Math.max(30,W*.09)}px system-ui`;
+ctx.fillText(Math.max(0,Math.ceil(30-matchTime)),W/2,H*.085);
+}
+}
+function frame(t){
+if(!cv.isConnected)return;
+if(!last)last=t;
+let dt=Math.min((t-last)/1000,.035);
+last=t;
+update(dt);
+render();
+requestAnimationFrame(frame);
+}
+window.addEventListener('resize',resize);
+resize();
+init();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
